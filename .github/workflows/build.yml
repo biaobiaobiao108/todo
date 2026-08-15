@@ -1,0 +1,31 @@
+name: Build macOS ARM64
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add target
+        run:
+          rustup target add aarch64-apple-darwin
+
+      - name: Build
+        run:
+          cargo build --release --target aarch64-apple-darwin
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: todo-macos-arm64
+          path: target/aarch64-apple-darwin/release/todo

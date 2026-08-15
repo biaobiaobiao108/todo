@@ -1,0 +1,23 @@
+# Rust build artifacts
+/target/
+
+# Local Todo data
+*.db
+*.sqlite
+*.sqlite3
+*.json.tmp
+
+# IDE and editor settings
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Operating system files
+.DS_Store
+Thumbs.db
+
+# Local environment files
+.env
+.env.*
+!.env.example

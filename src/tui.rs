@@ -20,7 +20,7 @@ use crate::storage::TodoStore;
 #[derive(Clone, Copy, PartialEq)]
 enum Filter {
     Pending,
-    All,
+    Completed,
 }
 
 pub fn run(store: &mut TodoStore) -> Result<()> {
@@ -136,7 +136,7 @@ fn app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, store: &mut TodoSt
                         code: KeyCode::Tab, ..
                     } => {
                         filter = if filter == Filter::Pending {
-                            Filter::All
+                            Filter::Completed
                         } else {
                             Filter::Pending
                         };
@@ -179,6 +179,7 @@ fn draw(
         ])
         .split(area);
     let pending = store.items().iter().filter(|item| !item.completed).count();
+    let completed = store.items().len() - pending;
     let title = Paragraph::new(Line::from(vec![
         Span::styled(
             " TODO ",
@@ -187,7 +188,7 @@ fn draw(
                 .bg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(format!("  {} / {} 项未完成", pending, store.items().len())),
+        Span::raw(format!("  未完成 {} · 已完成 {}", pending, completed)),
     ]))
     .block(Block::default().borders(Borders::BOTTOM));
     frame.render_widget(title, chunks[0]);
@@ -196,7 +197,7 @@ fn draw(
         .items()
         .iter()
         .enumerate()
-        .filter(|(_, item)| filter == Filter::All || !item.completed)
+        .filter(|(_, item)| matches_filter(item.completed, filter))
         .collect();
     let items: Vec<ListItem> = visible
         .iter()
@@ -224,7 +225,7 @@ fn draw(
                 .title(if filter == Filter::Pending {
                     " 未完成 "
                 } else {
-                    " 全部待办 "
+                    " 已完成 "
                 })
                 .borders(Borders::ALL),
         )
@@ -268,7 +269,7 @@ fn draw(
             .wrap(Wrap { trim: true }),
         body[1],
     );
-    let footer = Paragraph::new("↑↓选择  Enter/空格完成  a新增  d删除  Tab切换  q退出")
+    let footer = Paragraph::new("↑↓选择  Enter/空格切换状态  a新增  d删除  Tab切换列表  q退出")
         .style(Style::default().fg(Color::DarkGray));
     frame.render_widget(footer, chunks[2]);
 
@@ -316,7 +317,7 @@ fn visible_len(store: &TodoStore, filter: Filter) -> usize {
     store
         .items()
         .iter()
-        .filter(|item| filter == Filter::All || !item.completed)
+        .filter(|item| matches_filter(item.completed, filter))
         .count()
 }
 fn visible_index(store: &TodoStore, filter: Filter, position: usize) -> Option<usize> {
@@ -324,7 +325,7 @@ fn visible_index(store: &TodoStore, filter: Filter, position: usize) -> Option<u
         .items()
         .iter()
         .enumerate()
-        .filter(|(_, item)| filter == Filter::All || !item.completed)
+        .filter(|(_, item)| matches_filter(item.completed, filter))
         .nth(position)
         .map(|(index, _)| index)
 }
@@ -333,10 +334,18 @@ fn visible_position(store: &TodoStore, filter: Filter, index: usize) -> usize {
         .items()
         .iter()
         .enumerate()
-        .filter(|(_, item)| filter == Filter::All || !item.completed)
+        .filter(|(_, item)| matches_filter(item.completed, filter))
         .position(|(i, _)| i == index)
         .unwrap_or(0)
 }
+
+fn matches_filter(completed: bool, filter: Filter) -> bool {
+    match filter {
+        Filter::Pending => !completed,
+        Filter::Completed => completed,
+    }
+}
+
 fn row_at(row: u16, column: u16, store: &TodoStore, filter: Filter) -> Option<(usize, bool)> {
     if row < 4 {
         return None;

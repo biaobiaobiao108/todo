@@ -90,6 +90,22 @@ impl TodoStore {
         Ok(())
     }
 
+    pub fn update_title(&mut self, index: usize, title: String) -> Result<()> {
+        let title = title.trim().to_owned();
+        if title.is_empty() {
+            bail!("待办内容不能为空");
+        }
+        let item = self.data.get_mut(index).context("找不到选中的待办")?;
+        self.conn
+            .execute(
+                "UPDATE todos SET title = ?1 WHERE id = ?2",
+                params![title, item.id as i64],
+            )
+            .context("无法修改待办内容")?;
+        item.title = title;
+        Ok(())
+    }
+
     pub fn remove(&mut self, index: usize) -> Result<()> {
         let item = self.data.get(index).context("找不到选中的待办")?;
         self.conn
@@ -170,11 +186,17 @@ mod tests {
         let item = store.add("测试 SQLite".to_owned()).expect("新增应成功");
         assert_eq!(item.id, 1);
         assert_eq!(store.items().len(), 1);
+
+        // 修改测试
+        store.update_title(0, "修改后的标题".to_owned()).expect("修改应成功");
+        assert_eq!(store.items()[0].title, "修改后的标题");
+
         store.toggle(0).expect("完成应成功");
         assert!(store.items()[0].completed);
         drop(store);
 
         let mut reopened = TodoStore::open(&path).expect("数据库应当可以重新打开");
+        assert_eq!(reopened.items()[0].title, "修改后的标题");
         assert!(reopened.items()[0].completed);
         reopened.remove(0).expect("删除应成功");
         assert!(reopened.items().is_empty());

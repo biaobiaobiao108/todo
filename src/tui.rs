@@ -12,7 +12,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -265,16 +265,34 @@ fn draw(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // 顶部标题栏
-            Constraint::Min(8),    // 主体双栏
-            Constraint::Length(2), // 底部状态与快捷键提示
+            Constraint::Length(1), // 顶部 Header 与分类切换提示
+            Constraint::Min(6),    // 主体全宽待办列表
+            Constraint::Length(4), // 底部紧凑详情面板
+            Constraint::Length(1), // 底部快捷键指南
         ])
         .split(area);
 
     let pending = store.items().iter().filter(|item| !item.completed).count();
     let completed = store.items().len() - pending;
 
-    // 1. 顶部 Header
+    // 1. 顶部 Header 与分类状态
+    let pending_style = if filter == Filter::Pending {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let completed_style = if filter == Filter::Completed {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Green)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
     let header = Line::from(vec![
         Span::styled(
             " 📋 TODO ",
@@ -283,25 +301,16 @@ fn draw(
                 .bg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(" 极速终端待办清单"),
-        Span::styled("   ⏳ 未完成: ", Style::default().fg(Color::Yellow)),
-        Span::styled(
-            pending.to_string(),
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("   ✅ 已完成: ", Style::default().fg(Color::Green)),
-        Span::styled(
-            completed.to_string(),
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Span::raw("  "),
+        Span::styled(format!(" [Tab] ⏳ 进行中 ({pending}) "), pending_style),
+        Span::raw(" "),
+        Span::styled(format!(" ✅ 已完成 ({completed}) "), completed_style),
+        Span::raw("  "),
+        Span::styled("| 按 [Tab] 切换分类", Style::default().fg(Color::DarkGray)),
     ]);
     frame.render_widget(Paragraph::new(header), chunks[0]);
 
-    // 2. 主体左右分栏
+    // 2. 主体全宽待办列表
     let visible: Vec<_> = store
         .items()
         .iter()
@@ -310,10 +319,24 @@ fn draw(
         .collect();
 
     let list_title = if filter == Filter::Pending {
-        format!(" ⏳ 未完成待办 ({}) ", visible.len())
+        format!(" ⏳ 待办事项列表 ({}) ", visible.len())
     } else {
-        format!(" ✅ 已完成归档 ({}) ", visible.len())
+        format!(" ✅ 已完成归档列表 ({}) ", visible.len())
     };
+
+    let list_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(Span::styled(
+            list_title,
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+    let list_inner = list_block.inner(chunks[1]);
+    let total_width = list_inner.width as usize;
 
     let items: Vec<ListItem> = visible
         .iter()
@@ -328,6 +351,25 @@ fn draw(
                 ("⬜ ", Style::default().fg(Color::DarkGray))
             };
 
+            let num_str = format!("{}. ", ui_idx + 1);
+
+            let meta_str = if let Some(time) = item.completed_at {
+                format!("🎉 {}  #{}", time.format("%m-%d %H:%M"), item.id)
+            } else {
+                format!("🕒 {}  #{}", item.created_at.format("%m-%d %H:%M"), item.id)
+            };
+
+            let prefix_w = 2;
+            let check_w = 3;
+            let num_w = UnicodeWidthStr::width(num_str.as_str());
+            let meta_w = UnicodeWidthStr::width(meta_str.as_str());
+
+            let fixed_w = prefix_w + check_w + num_w + meta_w + 2;
+            let avail_title_w = total_width.saturating_sub(fixed_w);
+
+            let (display_title, title_w) = truncate_to_width(&item.title, avail_title_w);
+            let spacing = total_width.saturating_sub(prefix_w + check_w + num_w + title_w + meta_w);
+
             let title_style = if item.completed {
                 Style::default().fg(Color::DarkGray)
             } else if is_selected {
@@ -338,7 +380,7 @@ fn draw(
                 Style::default().fg(Color::White)
             };
 
-            ListItem::new(Line::from(vec![
+            let line = Line::from(vec![
                 Span::styled(
                     prefix,
                     if is_selected {
@@ -350,40 +392,34 @@ fn draw(
                     },
                 ),
                 Span::styled(check_icon, check_style),
-                Span::styled(&item.title, title_style),
-            ]))
+                Span::styled(num_str, Style::default().fg(Color::DarkGray)),
+                Span::styled(display_title, title_style),
+                Span::raw(" ".repeat(spacing)),
+                Span::styled(
+                    meta_str,
+                    if is_selected {
+                        Style::default().fg(Color::Gray)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    },
+                ),
+            ]);
+
+            ListItem::new(line)
         })
         .collect();
 
-    let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(chunks[1]);
-
-    let list_block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::DarkGray))
-        .title(Span::styled(
-            list_title,
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ));
-
-    let list_inner = list_block.inner(body[0]);
-
     if items.is_empty() {
         let empty_tip = if filter == Filter::Pending {
-            "🎉 暂无待办事项，按 [a] 新建一个吧！"
+            "🎉 暂无未完成待办事项，按 [a] 或 [n] 快速新建一个吧！"
         } else {
-            "📦 暂无已完成的待办记录"
+            "📦 暂无已完成的待办归档记录"
         };
         let p = Paragraph::new(empty_tip)
             .block(list_block)
             .alignment(Alignment::Center)
             .style(Style::default().fg(Color::DarkGray));
-        frame.render_widget(p, body[0]);
+        frame.render_widget(p, chunks[1]);
     } else {
         list_state.select(Some(selected.min(visible.len().saturating_sub(1))));
         let list = List::new(items).block(list_block).highlight_style(
@@ -391,17 +427,17 @@ fn draw(
                 .bg(Color::Rgb(35, 45, 60))
                 .add_modifier(Modifier::BOLD),
         );
-        frame.render_stateful_widget(list, body[0], list_state);
+        frame.render_stateful_widget(list, chunks[1], list_state);
     }
 
-    // 3. 右侧详情预览
+    // 3. 底部紧凑详情卡片
     let detail = visible.get(selected.min(visible.len().saturating_sub(1)));
     let detail_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::DarkGray))
         .title(Span::styled(
-            " 🔍 详细信息 ",
+            " 📌 选中待办详情 ",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -409,16 +445,49 @@ fn draw(
 
     if let Some((_, item)) = detail {
         let created_str = item.created_at.format("%Y-%m-%d %H:%M:%S").to_string();
-        let status_str = if item.completed {
-            "已完成 ✅"
+        let status_span = if item.completed {
+            Span::styled(
+                "已完成 ✅",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            )
         } else {
-            "进行中 ⏳"
+            Span::styled(
+                "进行中 ⏳",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )
         };
 
-        let mut lines = vec![
+        let mut meta_spans = vec![
+            Span::styled("🆔 编号: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("#{}   ", item.id), Style::default().fg(Color::Cyan)),
+            Span::styled("🕒 创建于: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{created_str}   "),
+                Style::default().fg(Color::Gray),
+            ),
+            Span::styled("🚦 状态: ", Style::default().fg(Color::DarkGray)),
+            status_span,
+        ];
+
+        if let Some(time) = item.completed_at {
+            meta_spans.push(Span::styled(
+                "   🎉 完成于: ",
+                Style::default().fg(Color::DarkGray),
+            ));
+            meta_spans.push(Span::styled(
+                time.format("%Y-%m-%d %H:%M:%S").to_string(),
+                Style::default().fg(Color::Green),
+            ));
+        }
+
+        let lines = vec![
             Line::from(vec![
                 Span::styled(
-                    "📌 待办: ",
+                    "📝 内容: ",
                     Style::default()
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD),
@@ -430,70 +499,30 @@ fn draw(
                         .add_modifier(Modifier::BOLD),
                 ),
             ]),
-            Line::from(vec![
-                Span::styled("🆔 编号: ", Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("#{}", item.id), Style::default().fg(Color::Cyan)),
-            ]),
-            Line::from(vec![
-                Span::styled("🕒 创建: ", Style::default().fg(Color::DarkGray)),
-                Span::styled(created_str, Style::default().fg(Color::Gray)),
-            ]),
-            Line::from(vec![
-                Span::styled("🚦 状态: ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    status_str,
-                    if item.completed {
-                        Style::default()
-                            .fg(Color::Green)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD)
-                    },
-                ),
-            ]),
+            Line::from(meta_spans),
         ];
 
-        if let Some(time) = item.completed_at {
-            lines.push(Line::from(vec![
-                Span::styled("🎉 完成于: ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    time.format("%Y-%m-%d %H:%M:%S").to_string(),
-                    Style::default().fg(Color::Green),
-                ),
-            ]));
-        }
-
-        lines.push(Line::from(Span::styled(
-            "─".repeat(body[1].width.saturating_sub(4) as usize),
-            Style::default().fg(Color::DarkGray),
-        )));
-        lines.push(Line::from(""));
-        lines.push(Line::from(vec![
-            Span::styled("💡 提示: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                "按 [Enter] 编辑内容，按 [Space] 切换完成状态",
-                Style::default().fg(Color::Gray),
-            ),
-        ]));
-
-        let p = Paragraph::new(lines)
-            .block(detail_block)
-            .wrap(Wrap { trim: false });
-        frame.render_widget(p, body[1]);
+        let p = Paragraph::new(lines).block(detail_block);
+        frame.render_widget(p, chunks[2]);
     } else {
-        let p = Paragraph::new("请选择左侧待办查看详情")
+        let p = Paragraph::new("💡 当前分类暂无待办事项，按 [a] 或 [n] 快速新建一条吧！")
             .block(detail_block)
             .alignment(Alignment::Center)
             .style(Style::default().fg(Color::DarkGray));
-        frame.render_widget(p, body[1]);
+        frame.render_widget(p, chunks[2]);
     }
 
     // 4. 底部快捷键状态栏
     let footer_line = Line::from(vec![
         Span::styled(
-            "[Enter]",
+            "[a/n]",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("新建 "),
+        Span::styled(
+            "[Enter/e]",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -505,32 +534,25 @@ fn draw(
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw("完成/取消 "),
-        Span::styled(
-            "[a]",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("新建 "),
+        Span::raw("切换完成 "),
         Span::styled(
             "[Tab]",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw("切换待办/已完成 "),
+        Span::raw("分类切换 "),
         Span::styled(
             "[d]",
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         ),
         Span::raw("删除 "),
         Span::styled("[j/k/↑/↓/点击]", Style::default().fg(Color::Yellow)),
-        Span::raw("选择 "),
+        Span::raw("移动选择 "),
         Span::styled("[q/Esc]", Style::default().fg(Color::DarkGray)),
         Span::raw("退出"),
     ]);
-    frame.render_widget(Paragraph::new(footer_line), chunks[2]);
+    frame.render_widget(Paragraph::new(footer_line), chunks[3]);
 
     // 5. 弹窗浮层
     if let Some((mode, value, cursor)) = input {
@@ -740,6 +762,30 @@ fn item_at(
     let visible_pos = offset + line_offset;
     let index = visible_index(store, filter, visible_pos)?;
     let rel_col = column.saturating_sub(list_inner.x);
-    let is_checkbox = (2..=6).contains(&rel_col);
+    // 列表项前缀为 "▶ ⬜ 1. "，0..=7 列点击直接切换完成状态
+    let is_checkbox = rel_col <= 7;
     Some((index, is_checkbox))
+}
+
+fn truncate_to_width(s: &str, max_width: usize) -> (String, usize) {
+    let total_str_width = UnicodeWidthStr::width(s);
+    if total_str_width <= max_width {
+        return (s.to_string(), total_str_width);
+    }
+    if max_width <= 3 {
+        return ("...".to_string(), 3);
+    }
+    let target_width = max_width - 3;
+    let mut current_width = 0;
+    let mut result = String::new();
+    for c in s.chars() {
+        let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if current_width + cw > target_width {
+            break;
+        }
+        result.push(c);
+        current_width += cw;
+    }
+    result.push_str("...");
+    (result, current_width + 3)
 }

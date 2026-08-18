@@ -37,7 +37,7 @@ pub fn run(store: &mut TodoStore) -> Result<()> {
         out,
         EnterAlternateScreen,
         event::EnableMouseCapture,
-        crossterm::cursor::SetCursorStyle::BlinkingUnderScore
+        crossterm::cursor::SetCursorStyle::BlinkingBar
     )?;
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
@@ -509,14 +509,16 @@ fn draw_input(frame: &mut Frame, mode: &InputState, value: &str, cursor: usize) 
             " 内容 (必填) ",
             Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
         ));
-    let p_input = Paragraph::new(value).block(input_block);
-    frame.render_widget(p_input, chunks[0]);
+    let input_inner = input_block.inner(chunks[0]);
+    frame.render_widget(input_block, chunks[0]);
+    let p_input = Paragraph::new(value);
+    frame.render_widget(p_input, input_inner);
 
     // 硬件光标精确定位（IME / 中文输入法定位）
     let before_cursor: String = value.chars().take(cursor).collect();
     let text_w = UnicodeWidthStr::width(before_cursor.as_str()) as u16;
-    let cursor_x = (chunks[0].x + 1 + text_w).min(chunks[0].right().saturating_sub(2));
-    let cursor_y = chunks[0].y + 1;
+    let cursor_x = (input_inner.x + text_w).min(input_inner.right().saturating_sub(1));
+    let cursor_y = input_inner.y;
     frame.set_cursor_position((cursor_x, cursor_y));
 
     let tip = Line::from(vec![

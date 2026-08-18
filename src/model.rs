@@ -1,6 +1,7 @@
 use chrono::{DateTime, Local};
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Todo {
     pub id: u64,
     pub title: String,

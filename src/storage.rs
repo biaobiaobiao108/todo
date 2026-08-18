@@ -111,6 +111,87 @@ impl TodoStore {
         Ok(())
     }
 
+    #[allow(dead_code)]
+    pub fn get_by_id(&self, id: u64) -> Option<&Todo> {
+        self.data.iter().find(|item| item.id == id)
+    }
+
+    pub fn find_index_by_id(&self, id: u64) -> Option<usize> {
+        self.data.iter().position(|item| item.id == id)
+    }
+
+    pub fn set_completed_by_id(&mut self, id: u64, completed: bool) -> Result<&Todo> {
+        let index = self
+            .find_index_by_id(id)
+            .with_context(|| format!("找不到编号为 #{id} 的待办事项"))?;
+        if self.data[index].completed == completed {
+            return Ok(&self.data[index]);
+        }
+        let completed_at = completed.then(Local::now);
+        self.conn
+            .execute(
+                "UPDATE todos SET completed = ?1, completed_at = ?2 WHERE id = ?3",
+                params![
+                    completed as i64,
+                    completed_at.as_ref().map(DateTime::to_rfc3339),
+                    id as i64
+                ],
+            )
+            .with_context(|| format!("无法更新待办 #{id} 状态"))?;
+        let item = &mut self.data[index];
+        item.completed = completed;
+        item.completed_at = completed_at;
+        Ok(&self.data[index])
+    }
+
+    pub fn update_title_by_id(&mut self, id: u64, title: String) -> Result<&Todo> {
+        let title = title.trim().to_owned();
+        if title.is_empty() {
+            bail!("待办内容不能为空");
+        }
+        let index = self
+            .find_index_by_id(id)
+            .with_context(|| format!("找不到编号为 #{id} 的待办事项"))?;
+        self.conn
+            .execute(
+                "UPDATE todos SET title = ?1 WHERE id = ?2",
+                params![title, id as i64],
+            )
+            .with_context(|| format!("无法修改待办 #{id} 内容"))?;
+        self.data[index].title = title;
+        Ok(&self.data[index])
+    }
+
+    pub fn remove_by_id(&mut self, id: u64) -> Result<Todo> {
+        let index = self
+            .find_index_by_id(id)
+            .with_context(|| format!("找不到编号为 #{id} 的待办事项"))?;
+        self.conn
+            .execute("DELETE FROM todos WHERE id = ?1", params![id as i64])
+            .with_context(|| format!("无法删除待办 #{id}"))?;
+        Ok(self.data.remove(index))
+    }
+
+    pub fn clear_completed(&mut self) -> Result<usize> {
+        let count = self
+            .conn
+            .execute("DELETE FROM todos WHERE completed = 1", [])
+            .context("无法清理已完成待办")?;
+        self.data.retain(|item| !item.completed);
+        Ok(count)
+    }
+
+    pub fn search(&self, keyword: &str) -> Vec<&Todo> {
+        let kw = keyword.trim().to_lowercase();
+        if kw.is_empty() {
+            return self.data.iter().collect();
+        }
+        self.data
+            .iter()
+            .filter(|item| item.title.to_lowercase().contains(&kw) || item.id.to_string() == kw)
+            .collect()
+    }
+
     pub fn remove(&mut self, index: usize) -> Result<()> {
         let item = self.data.get(index).context("找不到选中的待办")?;
         self.conn
@@ -228,5 +309,43 @@ mod tests {
         drop(store1);
         drop(store2);
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn id_based_crud_search_and_clear() {
+        let mut store = test_store();
+        let t1 = store.add("任务一".to_owned()).expect("添加1");
+        let id1 = t1.id;
+        let t2 = store.add("任务二(待办)".to_owned()).expect("添加2");
+        let id2 = t2.id;
+
+        assert_eq!(store.get_by_id(id1).unwrap().title, "任务一");
+        assert_eq!(store.search("二").len(), 1);
+        assert_eq!(store.search("二")[0].id, id2);
+
+        // 修改标题
+        store
+            .update_title_by_id(id1, "更新后的任务一".to_owned())
+            .expect("修改标题");
+        assert_eq!(store.get_by_id(id1).unwrap().title, "更新后的任务一");
+
+        // 标记完成
+        store.set_completed_by_id(id1, true).expect("标记完成");
+        assert!(store.get_by_id(id1).unwrap().completed);
+
+        // 撤销完成
+        store.set_completed_by_id(id1, false).expect("撤销完成");
+        assert!(!store.get_by_id(id1).unwrap().completed);
+
+        // 再次完成并测试 clear_completed
+        store.set_completed_by_id(id1, true).expect("标记完成");
+        let cleared = store.clear_completed().expect("清理完成待办");
+        assert_eq!(cleared, 1);
+        assert_eq!(store.items().len(), 1);
+        assert_eq!(store.items()[0].id, id2);
+
+        // 按 ID 删除
+        store.remove_by_id(id2).expect("按 ID 删除");
+        assert!(store.items().is_empty());
     }
 }

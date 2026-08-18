@@ -38,6 +38,10 @@
 ```bash
 cargo run -- -n "买牛奶"      # 快速添加一条待办
 cargo run -- -l               # 快速列出未完成待办
+cargo run -- add "买面包"     # 子命令添加待办
+cargo run -- list --all       # 列出全部待办
+cargo run -- done 1           # 标记待办 #1 为完成
+cargo run -- stats --json     # 查看待办统计指标（JSON 格式）
 cargo run                     # 打开全屏 TUI 交互界面
 cargo fmt --check             # 检查代码格式
 cargo test                    # 运行单元测试

@@ -106,6 +106,11 @@ impl TodoStore {
         Ok(())
     }
 
+    pub fn reload(&mut self) -> Result<()> {
+        self.data = load_items(&self.conn)?;
+        Ok(())
+    }
+
     pub fn remove(&mut self, index: usize) -> Result<()> {
         let item = self.data.get(index).context("找不到选中的待办")?;
         self.conn
@@ -163,7 +168,6 @@ fn data_path() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusqlite::OptionalExtension;
 
     fn test_store() -> TodoStore {
         let path = std::env::temp_dir().join(format!("todo-test-{}.db", std::process::id()));
@@ -188,7 +192,9 @@ mod tests {
         assert_eq!(store.items().len(), 1);
 
         // 修改测试
-        store.update_title(0, "修改后的标题".to_owned()).expect("修改应成功");
+        store
+            .update_title(0, "修改后的标题".to_owned())
+            .expect("修改应成功");
         assert_eq!(store.items()[0].title, "修改后的标题");
 
         store.toggle(0).expect("完成应成功");
@@ -205,21 +211,22 @@ mod tests {
     }
 
     #[test]
-    fn initializes_existing_database_without_json() {
-        let path = std::env::temp_dir().join(format!("todo-schema-test-{}.db", std::process::id()));
+    fn reloads_external_changes() {
+        let path = std::env::temp_dir().join(format!("todo-reload-test-{}.db", std::process::id()));
         let _ = fs::remove_file(&path);
-        let store = TodoStore::open(&path).expect("数据库应当可以初始化");
-        let table: Option<String> = store
-            .conn
-            .query_row(
-                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'todos'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()
-            .expect("应当可以查询表");
-        assert_eq!(table.as_deref(), Some("todos"));
-        drop(store);
+        let mut store1 = TodoStore::open(&path).expect("数据库应当可以打开");
+        let mut store2 = TodoStore::open(&path).expect("数据库应当可以打开");
+
+        store1.add("由实例1添加".to_owned()).expect("添加应成功");
+        assert_eq!(store1.items().len(), 1);
+        assert_eq!(store2.items().len(), 0);
+
+        store2.reload().expect("重载应成功");
+        assert_eq!(store2.items().len(), 1);
+        assert_eq!(store2.items()[0].title, "由实例1添加");
+
+        drop(store1);
+        drop(store2);
         let _ = fs::remove_file(path);
     }
 }

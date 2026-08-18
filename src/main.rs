@@ -32,20 +32,19 @@ fn print_pending(store: &TodoStore) {
         .filter(|item| !item.completed)
         .collect();
     if pending.is_empty() {
-        println!("🎉 暂无未完成待办事项。输入 `todo` 进入 TUI 或使用 `todo -n \"内容\"` 快速添加！");
+        println!(
+            "🎉 暂无未完成待办事项。输入 `todo` 进入 TUI 或使用 `todo -n \"内容\"` 快速添加！"
+        );
         return;
     }
 
     let total_pending = pending.len();
     // 按创建时间倒序（最新创建的排在前面）
-    pending.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    pending.sort_by_key(|b| std::cmp::Reverse(b.created_at));
     let display_items: Vec<_> = pending.into_iter().take(10).collect();
 
     if total_pending > 10 {
-        println!(
-            "📋 最近未完成待办 (最新 10 条 / 共 {} 项):",
-            total_pending
-        );
+        println!("📋 最近未完成待办 (最新 10 条 / 共 {} 项):", total_pending);
     } else {
         println!("📋 未完成待办清单 (共 {} 项):", total_pending);
     }

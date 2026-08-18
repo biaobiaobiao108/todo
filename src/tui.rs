@@ -4,15 +4,15 @@ use anyhow::Result;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
+    Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
-    Frame, Terminal,
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -58,17 +58,30 @@ fn app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, store: &mut TodoSt
     let mut selected = 0usize;
     let mut input = None::<(InputState, String, usize)>; // (模式, 内容, 光标字符索引)
     let mut confirm_delete = false;
+    let mut list_state = ListState::default();
+    let mut list_inner_rect = Rect::default();
 
     loop {
+        if input.is_none() {
+            let _ = store.reload();
+        }
+        let total_vis = visible_len(store, filter);
+        if total_vis > 0 && selected >= total_vis {
+            selected = total_vis - 1;
+        } else if total_vis == 0 {
+            selected = 0;
+        }
+
         terminal.draw(|frame| {
-            draw(
+            list_inner_rect = draw(
                 frame,
                 store,
                 filter,
                 selected,
                 input.as_ref(),
                 confirm_delete,
-            )
+                &mut list_state,
+            );
         })?;
         if !event::poll(std::time::Duration::from_millis(100))? {
             continue;
@@ -174,12 +187,12 @@ fn app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, store: &mut TodoSt
                         code: KeyCode::Enter | KeyCode::Char('e'),
                         ..
                     } => {
-                        if let Some(index) = visible_index(store, filter, selected) {
-                            if let Some(item) = store.items().get(index) {
-                                let title = item.title.clone();
-                                let cursor = title.chars().count();
-                                input = Some((InputState::Editing(index), title, cursor));
-                            }
+                        if let Some(index) = visible_index(store, filter, selected)
+                            && let Some(item) = store.items().get(index)
+                        {
+                            let title = item.title.clone();
+                            let cursor = title.chars().count();
+                            input = Some((InputState::Editing(index), title, cursor));
                         }
                     }
                     // 空格键 Space：快速切换待办完成状态
@@ -218,7 +231,14 @@ fn app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, store: &mut TodoSt
             }
             Event::Mouse(mouse) => {
                 if let MouseEventKind::Down(MouseButton::Left) = mouse.kind
-                    && let Some((index, checkbox)) = row_at(mouse.row, mouse.column, store, filter)
+                    && let Some((index, checkbox)) = item_at(
+                        mouse.row,
+                        mouse.column,
+                        list_inner_rect,
+                        list_state.offset(),
+                        store,
+                        filter,
+                    )
                 {
                     selected = visible_position(store, filter, index);
                     if checkbox {
@@ -239,7 +259,8 @@ fn draw(
     selected: usize,
     input: Option<&(InputState, String, usize)>,
     confirm: bool,
-) {
+    list_state: &mut ListState,
+) -> Rect {
     let area = frame.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -266,12 +287,16 @@ fn draw(
         Span::styled("   ⏳ 未完成: ", Style::default().fg(Color::Yellow)),
         Span::styled(
             pending.to_string(),
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled("   ✅ 已完成: ", Style::default().fg(Color::Green)),
         Span::styled(
             completed.to_string(),
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
         ),
     ]);
     frame.render_widget(Paragraph::new(header), chunks[0]);
@@ -306,7 +331,9 @@ fn draw(
             let title_style = if item.completed {
                 Style::default().fg(Color::DarkGray)
             } else if is_selected {
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::White)
             };
@@ -315,7 +342,9 @@ fn draw(
                 Span::styled(
                     prefix,
                     if is_selected {
-                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default()
                     },
@@ -337,8 +366,12 @@ fn draw(
         .border_style(Style::default().fg(Color::DarkGray))
         .title(Span::styled(
             list_title,
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ));
+
+    let list_inner = list_block.inner(body[0]);
 
     if items.is_empty() {
         let empty_tip = if filter == Filter::Pending {
@@ -352,16 +385,13 @@ fn draw(
             .style(Style::default().fg(Color::DarkGray));
         frame.render_widget(p, body[0]);
     } else {
-        let mut state = ListState::default();
-        state.select(Some(selected.min(visible.len().saturating_sub(1))));
-        let list = List::new(items)
-            .block(list_block)
-            .highlight_style(
-                Style::default()
-                    .bg(Color::Rgb(35, 45, 60))
-                    .add_modifier(Modifier::BOLD),
-            );
-        frame.render_stateful_widget(list, body[0], &mut state);
+        list_state.select(Some(selected.min(visible.len().saturating_sub(1))));
+        let list = List::new(items).block(list_block).highlight_style(
+            Style::default()
+                .bg(Color::Rgb(35, 45, 60))
+                .add_modifier(Modifier::BOLD),
+        );
+        frame.render_stateful_widget(list, body[0], list_state);
     }
 
     // 3. 右侧详情预览
@@ -372,7 +402,9 @@ fn draw(
         .border_style(Style::default().fg(Color::DarkGray))
         .title(Span::styled(
             " 🔍 详细信息 ",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ));
 
     if let Some((_, item)) = detail {
@@ -385,8 +417,18 @@ fn draw(
 
         let mut lines = vec![
             Line::from(vec![
-                Span::styled("📌 待办: ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-                Span::styled(&item.title, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "📌 待办: ",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    &item.title,
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
             ]),
             Line::from(vec![
                 Span::styled("🆔 编号: ", Style::default().fg(Color::DarkGray)),
@@ -401,9 +443,13 @@ fn draw(
                 Span::styled(
                     status_str,
                     if item.completed {
-                        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+                        Style::default()
+                            .fg(Color::Green)
+                            .add_modifier(Modifier::BOLD)
                     } else {
-                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD)
                     },
                 ),
             ]),
@@ -412,7 +458,10 @@ fn draw(
         if let Some(time) = item.completed_at {
             lines.push(Line::from(vec![
                 Span::styled("🎉 完成于: ", Style::default().fg(Color::DarkGray)),
-                Span::styled(time.format("%Y-%m-%d %H:%M:%S").to_string(), Style::default().fg(Color::Green)),
+                Span::styled(
+                    time.format("%Y-%m-%d %H:%M:%S").to_string(),
+                    Style::default().fg(Color::Green),
+                ),
             ]));
         }
 
@@ -423,7 +472,10 @@ fn draw(
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
             Span::styled("💡 提示: ", Style::default().fg(Color::DarkGray)),
-            Span::styled("按 [Enter] 编辑内容，按 [Space] 切换完成状态", Style::default().fg(Color::Gray)),
+            Span::styled(
+                "按 [Enter] 编辑内容，按 [Space] 切换完成状态",
+                Style::default().fg(Color::Gray),
+            ),
         ]));
 
         let p = Paragraph::new(lines)
@@ -440,15 +492,38 @@ fn draw(
 
     // 4. 底部快捷键状态栏
     let footer_line = Line::from(vec![
-        Span::styled("[Enter]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "[Enter]",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw("编辑 "),
-        Span::styled("[Space]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "[Space]",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw("完成/取消 "),
-        Span::styled("[a]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "[a]",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw("新建 "),
-        Span::styled("[Tab]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "[Tab]",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw("切换待办/已完成 "),
-        Span::styled("[d]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "[d]",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ),
         Span::raw("删除 "),
         Span::styled("[j/k/↑/↓/点击]", Style::default().fg(Color::Yellow)),
         Span::raw("选择 "),
@@ -462,9 +537,13 @@ fn draw(
         draw_input(frame, mode, value, *cursor);
     }
     if confirm {
-        let title = detail.map(|(_, item)| item.title.as_str()).unwrap_or("该待办");
+        let title = detail
+            .map(|(_, item)| item.title.as_str())
+            .unwrap_or("该待办");
         draw_confirm(frame, title);
     }
+
+    list_inner
 }
 
 fn draw_input(frame: &mut Frame, mode: &InputState, value: &str, cursor: usize) {
@@ -482,7 +561,9 @@ fn draw_input(frame: &mut Frame, mode: &InputState, value: &str, cursor: usize) 
         .border_style(Style::default().fg(Color::Cyan))
         .title(Span::styled(
             modal_title,
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ));
     frame.render_widget(block, area);
 
@@ -507,7 +588,9 @@ fn draw_input(frame: &mut Frame, mode: &InputState, value: &str, cursor: usize) 
         .border_style(Style::default().fg(Color::Yellow))
         .title(Span::styled(
             " 内容 (必填) ",
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         ));
     let input_inner = input_block.inner(chunks[0]);
     frame.render_widget(input_block, chunks[0]);
@@ -522,7 +605,12 @@ fn draw_input(frame: &mut Frame, mode: &InputState, value: &str, cursor: usize) 
     frame.set_cursor_position((cursor_x, cursor_y));
 
     let tip = Line::from(vec![
-        Span::styled("[Enter]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "[Enter]",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" 保存待办    "),
         Span::styled("[Esc]", Style::default().fg(Color::DarkGray)),
         Span::raw(" 取消"),
@@ -547,13 +635,24 @@ fn draw_confirm(frame: &mut Frame, target_title: &str) {
         Line::from(""),
         Line::from(vec![
             Span::raw("确定要删除待办「"),
-            Span::styled(target_title, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                target_title,
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw("」吗？"),
         ]),
-        Line::from(Span::styled("此操作不可恢复！", Style::default().fg(Color::Red))),
+        Line::from(Span::styled(
+            "此操作不可恢复！",
+            Style::default().fg(Color::Red),
+        )),
         Line::from(""),
         Line::from(vec![
-            Span::styled("[y / Enter] 确认删除", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "[y / Enter] 确认删除",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
             Span::raw("    "),
             Span::styled("[n / Esc] 取消", Style::default().fg(Color::Gray)),
         ]),
@@ -620,11 +719,27 @@ fn matches_filter(completed: bool, filter: Filter) -> bool {
     }
 }
 
-fn row_at(row: u16, column: u16, store: &TodoStore, filter: Filter) -> Option<(usize, bool)> {
-    if row < 2 {
+fn item_at(
+    row: u16,
+    column: u16,
+    list_inner: Rect,
+    offset: usize,
+    store: &TodoStore,
+    filter: Filter,
+) -> Option<(usize, bool)> {
+    if list_inner.width == 0 || list_inner.height == 0 {
         return None;
     }
-    let position = (row.saturating_sub(2)) as usize;
-    let index = visible_index(store, filter, position)?;
-    Some((index, (2..=6).contains(&column)))
+    if row < list_inner.y || row >= list_inner.bottom() {
+        return None;
+    }
+    if column < list_inner.x || column >= list_inner.right() {
+        return None;
+    }
+    let line_offset = (row - list_inner.y) as usize;
+    let visible_pos = offset + line_offset;
+    let index = visible_index(store, filter, visible_pos)?;
+    let rel_col = column.saturating_sub(list_inner.x);
+    let is_checkbox = (2..=6).contains(&rel_col);
+    Some((index, is_checkbox))
 }

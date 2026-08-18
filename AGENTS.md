@@ -1,4 +1,5 @@
-# Repository Guidelines
+# 项目指南 (Repository Guidelines)
+
 ## 铁律规则 (Ironclad Rules)
 
 1. **代码修改后自动提交并推送 Git**：
@@ -15,45 +16,61 @@
 
 ---
 
-## Project Structure & Module Organization
+## 项目结构与模块划分 (Project Structure & Module Organization)
 
-This repository is a small Rust command-line Todo application.
+本项目是一个轻量级的 Rust 命令行与终端全屏界面（CLI & TUI）Todo 待办事项应用。
 
-- `src/main.rs`: application entry point and CLI command dispatch.
-- `src/cli.rs`: `clap` command-line argument definitions.
-- `src/model.rs`: shared `Todo` data model.
-- `src/storage.rs`: SQLite connection, schema initialization, and CRUD operations.
-- `src/tui.rs`: `ratatui`/`crossterm` terminal interface and input handling.
-- `Cargo.toml` and `Cargo.lock`: dependency and reproducible build configuration.
+- `src/main.rs`：应用程序入口与 CLI 命令分发。
+- `src/cli.rs`：基于 `clap` 的命令行参数定义。
+- `src/model.rs`：共享的 `Todo` 数据模型。
+- `src/storage.rs`：SQLite 连接管理、数据表结构初始化及 CRUD 操作。
+- `src/tui.rs`：基于 `ratatui` 与 `crossterm` 的终端用户界面及交互逻辑。
+- `Cargo.toml` 与 `Cargo.lock`：依赖项与可复现构建配置。
 
-There are no checked-in assets. Runtime data is stored outside the repository at the user data directory, typically `~/.local/share/todo/todos.db`.
+仓库内不提交运行时数据文件。运行时数据存储在用户的本地数据目录中，Linux/macOS 下通常位于 `~/.local/share/todo/todos.db`。
 
-## Build, Test, and Development Commands
+---
 
-Run commands from the repository root:
+## 构建、测试与常用命令 (Build, Test, and Development Commands)
+
+请在项目根目录下执行以下命令：
 
 ```bash
-cargo run -- -n "Buy milk"    # Add a Todo
-cargo run -- -l               # List unfinished Todos
-cargo run                     # Open the TUI
-cargo fmt --check             # Verify formatting
-cargo test                    # Run unit tests
-cargo clippy --all-targets --all-features -- -D warnings
-cargo build --release         # Build the standalone binary
+cargo run -- -n "买牛奶"      # 快速添加一条待办
+cargo run -- -l               # 快速列出未完成待办
+cargo run                     # 打开全屏 TUI 交互界面
+cargo fmt --check             # 检查代码格式
+cargo test                    # 运行单元测试
+cargo clippy --all-targets --all-features -- -D warnings # 运行 Clippy 静态检查
+cargo build --release         # 构建优化后的 Release 单文件二进制
+cargo install --path .        # 将最新二进制安装/覆盖至 ~/.cargo/bin/
 ```
 
-Use `cargo fmt` only when intentionally applying formatting changes. The release binary is written to `target/release/todo`.
+编译生成的 release 二进制位于 `target/release/todo`。
 
-## Coding Style & Naming Conventions
+---
 
-Use standard Rust formatting with four-space indentation and run `cargo fmt`. Follow idiomatic Rust naming: `snake_case` for functions and variables, `PascalCase` for types, and `SCREAMING_SNAKE_CASE` only for constants. Keep storage, model, CLI, and TUI responsibilities separated; avoid unrelated refactors in feature changes. Add context to fallible operations with `anyhow` where useful.
+## 编码规范与命名约定 (Coding Style & Naming Conventions)
 
-## Testing Guidelines
+- 遵循标准的 Rust 格式化规范（4 空格缩进），在提交前运行 `cargo fmt`。
+- 遵循惯用的 Rust 命名规范：函数与变量使用 `snake_case`，类型使用 `PascalCase`，常量使用 `SCREAMING_SNAKE_CASE`。
+- 保持各层职责清晰分离（Storage、Model、CLI 与 TUI），避免在实现功能特性时引入无关的代码重构。
+- 对可能产生错误的操作，使用 `anyhow` 提供清晰丰富的上下文错误信息。
 
-Unit tests currently live alongside the storage implementation in `src/storage.rs`. Test names should describe behavior, for example `persists_add_toggle_and_remove`. Any storage change should cover initialization, persistence across reopen, and invalid input. Run `cargo test` and Clippy before submitting changes.
+---
 
-## Commit & Pull Request Guidelines
+## 测试准则 (Testing Guidelines)
 
-Use concise Conventional Commit-style messages, consistent with the existing history: `feat: ...`, `fix: ...`, or `refactor: ...`. Keep each commit focused.
+- 单元测试目前位于 `src/storage.rs` 中。
+- 测试用例名称应当准确描述测试行为（例如 `persists_add_toggle_and_remove`、`reloads_external_changes`）。
+- 针对存储层的任何修改，都应覆盖初始化、跨实例重新打开的数据持久性、无效输入处理以及外部数据重载。
+- 提交代码前必须确保 `cargo test` 与 `cargo clippy` 均完全通过。
 
-Pull requests should explain the user-visible change, mention relevant commands used for validation, and call out database schema or data-location changes. Include terminal screenshots or recordings when changing TUI behavior. Do not commit `target/`, local databases, editor settings, or secrets.
+---
+
+## 提交与 PR 规范 (Commit & Pull Request Guidelines)
+
+- 使用简洁、规范且符合 Conventional Commits 标准的提交信息，例如：`feat: ...`、`fix: ...` 或 `refactor: ...`，保持每次提交专注且独立。
+- 提交说明应解释用户可见的变更，提及用于验证的相关命令，并说明数据库 Schema 或数据存储位置的任何变更。
+- 若修改了 TUI 交互行为，建议说明视觉与按键行为变化。
+- 严禁将 `target/` 目录、本地测试数据库文件、个人编辑器配置或密钥提交至仓库中。

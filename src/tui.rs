@@ -30,6 +30,14 @@ enum InputState {
     Editing(usize), // store 里的原始索引
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct ActiveInput {
+    mode: InputState,
+    text: String,
+    cursor: usize,
+    scroll_top: usize,
+}
+
 pub fn run(store: &mut TodoStore) -> Result<()> {
     enable_raw_mode()?;
     let mut out = stdout();
@@ -56,7 +64,7 @@ pub fn run(store: &mut TodoStore) -> Result<()> {
 fn app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, store: &mut TodoStore) -> Result<()> {
     let mut filter = Filter::Pending;
     let mut selected = 0usize;
-    let mut input = None::<(InputState, String, usize)>; // (模式, 内容, 光标字符索引)
+    let mut input = None::<ActiveInput>;
     let mut confirm_delete = false;
     let mut list_state = ListState::default();
     let mut list_inner_rect = Rect::default();
@@ -88,12 +96,19 @@ fn app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, store: &mut TodoSt
         }
         match event::read()? {
             Event::Key(key) if input.is_some() => {
-                let (_mode, text, cursor) = input.as_mut().unwrap();
+                let size = terminal.size()?;
+                let input_inner = input_box_inner(Rect::new(0, 0, size.width, size.height));
+                let inner_w = input_inner.width as usize;
+                let inner_h = input_inner.height as usize;
+
+                let active = input.as_mut().unwrap();
                 match key.code {
                     KeyCode::Esc => input = None,
-                    KeyCode::Enter => {
-                        let (mode, title, _) = input.take().unwrap();
-                        let title = title.trim().to_string();
+                    KeyCode::Char('s') | KeyCode::Char('S')
+                        if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        let ActiveInput { mode, text, .. } = input.take().unwrap();
+                        let title = text.trim().to_string();
                         if !title.is_empty() {
                             match mode {
                                 InputState::Creating => {
@@ -105,69 +120,92 @@ fn app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, store: &mut TodoSt
                             }
                         }
                     }
+                    KeyCode::Enter => {
+                        let mut chars: Vec<char> = active.text.chars().collect();
+                        let idx = active.cursor.min(chars.len());
+                        chars.insert(idx, '\n');
+                        active.text = chars.into_iter().collect();
+                        active.cursor += 1;
+                        ensure_cursor_visible(active, inner_w, inner_h);
+                    }
                     KeyCode::Left => {
-                        *cursor = cursor.saturating_sub(1);
+                        active.cursor = active.cursor.saturating_sub(1);
+                        ensure_cursor_visible(active, inner_w, inner_h);
                     }
                     KeyCode::Right => {
-                        let max_len = text.chars().count();
-                        if *cursor < max_len {
-                            *cursor += 1;
+                        let max_len = active.text.chars().count();
+                        if active.cursor < max_len {
+                            active.cursor += 1;
                         }
+                        ensure_cursor_visible(active, inner_w, inner_h);
                     }
                     KeyCode::Up => {
-                        let size = terminal.size()?;
-                        let input_inner = input_box_inner(Rect::new(0, 0, size.width, size.height));
-                        let wrapped = wrap_input_text(text, input_inner.width as usize, *cursor);
+                        let wrapped = wrap_input_text(&active.text, inner_w, active.cursor);
                         if wrapped.cursor_line > 0 {
-                            *cursor = char_at_line_col(
-                                text,
+                            active.cursor = char_at_line_col(
+                                &active.text,
                                 &wrapped,
                                 wrapped.cursor_line - 1,
                                 wrapped.cursor_col,
                             );
+                            ensure_cursor_visible(active, inner_w, inner_h);
                         }
                     }
                     KeyCode::Down => {
-                        let size = terminal.size()?;
-                        let input_inner = input_box_inner(Rect::new(0, 0, size.width, size.height));
-                        let wrapped = wrap_input_text(text, input_inner.width as usize, *cursor);
+                        let wrapped = wrap_input_text(&active.text, inner_w, active.cursor);
                         if wrapped.cursor_line + 1 < wrapped.lines.len() {
-                            *cursor = char_at_line_col(
-                                text,
+                            active.cursor = char_at_line_col(
+                                &active.text,
                                 &wrapped,
                                 wrapped.cursor_line + 1,
                                 wrapped.cursor_col,
                             );
+                            ensure_cursor_visible(active, inner_w, inner_h);
                         }
                     }
+                    KeyCode::PageUp => {
+                        let page = inner_h.max(1);
+                        active.scroll_top = active.scroll_top.saturating_sub(page);
+                    }
+                    KeyCode::PageDown => {
+                        let page = inner_h.max(1);
+                        let wrapped = wrap_input_text(&active.text, inner_w, active.cursor);
+                        let max_scroll = wrapped.lines.len().saturating_sub(inner_h);
+                        active.scroll_top = (active.scroll_top + page).min(max_scroll);
+                    }
                     KeyCode::Home => {
-                        *cursor = 0;
+                        active.cursor = 0;
+                        ensure_cursor_visible(active, inner_w, inner_h);
                     }
                     KeyCode::End => {
-                        *cursor = text.chars().count();
+                        active.cursor = active.text.chars().count();
+                        ensure_cursor_visible(active, inner_w, inner_h);
                     }
                     KeyCode::Backspace => {
-                        if *cursor > 0 {
-                            let mut chars: Vec<char> = text.chars().collect();
-                            let idx = (*cursor).min(chars.len());
+                        if active.cursor > 0 {
+                            let mut chars: Vec<char> = active.text.chars().collect();
+                            let idx = active.cursor.min(chars.len());
                             chars.remove(idx - 1);
-                            *text = chars.into_iter().collect();
-                            *cursor -= 1;
+                            active.text = chars.into_iter().collect();
+                            active.cursor -= 1;
+                            ensure_cursor_visible(active, inner_w, inner_h);
                         }
                     }
                     KeyCode::Delete => {
-                        let mut chars: Vec<char> = text.chars().collect();
-                        if *cursor < chars.len() {
-                            chars.remove(*cursor);
-                            *text = chars.into_iter().collect();
+                        let mut chars: Vec<char> = active.text.chars().collect();
+                        if active.cursor < chars.len() {
+                            chars.remove(active.cursor);
+                            active.text = chars.into_iter().collect();
+                            ensure_cursor_visible(active, inner_w, inner_h);
                         }
                     }
                     KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        let mut chars: Vec<char> = text.chars().collect();
-                        let idx = (*cursor).min(chars.len());
+                        let mut chars: Vec<char> = active.text.chars().collect();
+                        let idx = active.cursor.min(chars.len());
                         chars.insert(idx, c);
-                        *text = chars.into_iter().collect();
-                        *cursor += 1;
+                        active.text = chars.into_iter().collect();
+                        active.cursor += 1;
+                        ensure_cursor_visible(active, inner_w, inner_h);
                     }
                     _ => {}
                 }
@@ -208,6 +246,18 @@ fn app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, store: &mut TodoSt
                             .saturating_add(1)
                             .min(visible_len(store, filter).saturating_sub(1))
                     }
+                    KeyEvent {
+                        code: KeyCode::PageUp,
+                        ..
+                    } => selected = selected.saturating_sub(5),
+                    KeyEvent {
+                        code: KeyCode::PageDown,
+                        ..
+                    } => {
+                        selected = selected
+                            .saturating_add(5)
+                            .min(visible_len(store, filter).saturating_sub(1))
+                    }
                     // 回车键 Enter 或 e 键：进入再次编辑模式
                     KeyEvent {
                         code: KeyCode::Enter | KeyCode::Char('e'),
@@ -218,7 +268,12 @@ fn app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, store: &mut TodoSt
                         {
                             let title = item.title.clone();
                             let cursor = title.chars().count();
-                            input = Some((InputState::Editing(index), title, cursor));
+                            input = Some(ActiveInput {
+                                mode: InputState::Editing(index),
+                                text: title,
+                                cursor,
+                                scroll_top: 0,
+                            });
                         }
                     }
                     // 空格键 Space：快速切换待办完成状态
@@ -233,7 +288,14 @@ fn app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, store: &mut TodoSt
                     KeyEvent {
                         code: KeyCode::Char('a') | KeyCode::Char('n'),
                         ..
-                    } => input = Some((InputState::Creating, String::new(), 0)),
+                    } => {
+                        input = Some(ActiveInput {
+                            mode: InputState::Creating,
+                            text: String::new(),
+                            cursor: 0,
+                            scroll_top: 0,
+                        });
+                    }
                     KeyEvent {
                         code: KeyCode::Char('d') | KeyCode::Delete,
                         ..
@@ -255,23 +317,51 @@ fn app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, store: &mut TodoSt
                     _ => {}
                 }
             }
-            Event::Mouse(mouse) => {
-                if let MouseEventKind::Down(MouseButton::Left) = mouse.kind
-                    && let Some((index, checkbox)) = item_at(
+            Event::Mouse(mouse) => match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    if let Some(active) = input.as_mut() {
+                        active.scroll_top = active.scroll_top.saturating_sub(1);
+                    } else {
+                        selected = selected.saturating_sub(1);
+                    }
+                }
+                MouseEventKind::ScrollDown => {
+                    if let Some(active) = input.as_mut() {
+                        let size = terminal.size()?;
+                        let input_inner = input_box_inner(Rect::new(0, 0, size.width, size.height));
+                        let wrapped = wrap_input_text(
+                            &active.text,
+                            input_inner.width as usize,
+                            active.cursor,
+                        );
+                        let max_scroll = wrapped
+                            .lines
+                            .len()
+                            .saturating_sub(input_inner.height as usize);
+                        active.scroll_top = (active.scroll_top + 1).min(max_scroll);
+                    } else {
+                        selected = selected
+                            .saturating_add(1)
+                            .min(visible_len(store, filter).saturating_sub(1));
+                    }
+                }
+                MouseEventKind::Down(MouseButton::Left) if input.is_none() => {
+                    if let Some((index, checkbox)) = item_at(
                         mouse.row,
                         mouse.column,
                         list_inner_rect,
                         list_state.offset(),
                         store,
                         filter,
-                    )
-                {
-                    selected = visible_position(store, filter, index);
-                    if checkbox {
-                        store.toggle(index)?;
+                    ) {
+                        selected = visible_position(store, filter, index);
+                        if checkbox {
+                            store.toggle(index)?;
+                        }
                     }
                 }
-            }
+                _ => {}
+            },
             _ => {}
         }
     }
@@ -283,7 +373,7 @@ fn draw(
     store: &TodoStore,
     filter: Filter,
     selected: usize,
-    input: Option<&(InputState, String, usize)>,
+    input: Option<&ActiveInput>,
     confirm: bool,
     list_state: &mut ListState,
 ) -> Rect {
@@ -393,7 +483,8 @@ fn draw(
             let fixed_w = prefix_w + check_w + num_w + meta_w + 2;
             let avail_title_w = total_width.saturating_sub(fixed_w);
 
-            let (display_title, title_w) = truncate_to_width(&item.title, avail_title_w);
+            let display_source = item.title.replace('\n', " ↵ ");
+            let (display_title, title_w) = truncate_to_width(&display_source, avail_title_w);
             let spacing = total_width.saturating_sub(prefix_w + check_w + num_w + title_w + meta_w);
 
             let title_style = if item.completed {
@@ -510,6 +601,7 @@ fn draw(
             ));
         }
 
+        let display_title = item.title.replace('\n', " ↵ ");
         let lines = vec![
             Line::from(vec![
                 Span::styled(
@@ -519,7 +611,7 @@ fn draw(
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    &item.title,
+                    display_title,
                     Style::default()
                         .fg(Color::White)
                         .add_modifier(Modifier::BOLD),
@@ -573,7 +665,7 @@ fn draw(
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         ),
         Span::raw("删除 "),
-        Span::styled("[j/k/↑/↓/点击]", Style::default().fg(Color::Yellow)),
+        Span::styled("[j/k/↑/↓/滚轮]", Style::default().fg(Color::Yellow)),
         Span::raw("移动选择 "),
         Span::styled("[q/Esc]", Style::default().fg(Color::DarkGray)),
         Span::raw("退出"),
@@ -581,8 +673,8 @@ fn draw(
     frame.render_widget(Paragraph::new(footer_line), chunks[3]);
 
     // 5. 弹窗浮层
-    if let Some((mode, value, cursor)) = input {
-        draw_input(frame, mode, value, *cursor);
+    if let Some(active) = input {
+        draw_input(frame, active);
     }
     if confirm {
         let title = detail
@@ -613,6 +705,16 @@ fn input_box_inner(area: Rect) -> Rect {
     input_block.inner(chunks[0])
 }
 
+fn ensure_cursor_visible(input: &mut ActiveInput, width: usize, height: usize) {
+    let height = height.max(1);
+    let wrapped = wrap_input_text(&input.text, width, input.cursor);
+    if wrapped.cursor_line < input.scroll_top {
+        input.scroll_top = wrapped.cursor_line;
+    } else if wrapped.cursor_line >= input.scroll_top + height {
+        input.scroll_top = wrapped.cursor_line + 1 - height;
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct WrappedInput {
     lines: Vec<String>,
@@ -633,6 +735,19 @@ fn wrap_input_text(text: &str, max_width: usize, cursor_char_idx: usize) -> Wrap
     let chars: Vec<char> = text.chars().collect();
 
     for (i, &c) in chars.iter().enumerate() {
+        if i == cursor_char_idx {
+            cursor_pos = Some((lines.len(), current_width));
+        }
+
+        if c == '\n' {
+            line_char_ranges.push(line_start_char..i + 1);
+            lines.push(current_line);
+            current_line = String::new();
+            current_width = 0;
+            line_start_char = i + 1;
+            continue;
+        }
+
         let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(1);
 
         if current_width + cw > max_width && current_width > 0 {
@@ -643,22 +758,11 @@ fn wrap_input_text(text: &str, max_width: usize, cursor_char_idx: usize) -> Wrap
             line_start_char = i;
         }
 
-        if i == cursor_char_idx {
-            cursor_pos = Some((lines.len(), current_width));
-        }
-
         current_line.push(c);
         current_width += cw;
     }
 
     if cursor_pos.is_none() && cursor_char_idx >= chars.len() {
-        if current_width >= max_width && current_width > 0 {
-            line_char_ranges.push(line_start_char..chars.len());
-            lines.push(current_line);
-            current_line = String::new();
-            current_width = 0;
-            line_start_char = chars.len();
-        }
         cursor_pos = Some((lines.len(), current_width));
     }
 
@@ -685,22 +789,30 @@ fn char_at_line_col(
     }
     let range = &wrapped.line_char_ranges[target_line];
     let chars: Vec<char> = text.chars().collect();
+    let start = range.start;
+    let end = range.end.min(chars.len());
     let mut w = 0;
-    for (offset, &c) in chars[range.clone()].iter().enumerate() {
+    for (offset, &c) in chars[start..end].iter().enumerate() {
+        if c == '\n' {
+            return start + offset;
+        }
         let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(1);
         if w + cw > target_col {
-            return range.start + offset;
+            return start + offset;
         }
         w += cw;
     }
-    range.end
+    if end > start && end <= chars.len() && chars[end - 1] == '\n' {
+        return end - 1;
+    }
+    end
 }
 
-fn draw_input(frame: &mut Frame, mode: &InputState, value: &str, cursor: usize) {
+fn draw_input(frame: &mut Frame, active: &ActiveInput) {
     let modal_area = centered(frame.area(), 70, 45);
     frame.render_widget(Clear, modal_area);
 
-    let modal_title = match mode {
+    let modal_title = match active.mode {
         InputState::Creating => " ➕ 新增待办事项 ",
         InputState::Editing(_) => " ✏️ 编辑待办事项 ",
     };
@@ -732,29 +844,35 @@ fn draw_input(frame: &mut Frame, mode: &InputState, value: &str, cursor: usize) 
         ])
         .split(inner);
 
+    let max_w = chunks[0].width.saturating_sub(2) as usize;
+    let max_h = chunks[0].height.saturating_sub(2) as usize;
+    let wrapped = wrap_input_text(&active.text, max_w, active.cursor);
+
+    let max_scroll = wrapped.lines.len().saturating_sub(max_h);
+    let scroll_y = active.scroll_top.min(max_scroll);
+
+    let scroll_info = if wrapped.lines.len() > max_h {
+        format!(
+            " (第 {}/{} 行，滚轮/PgUp/PgDn翻页) ",
+            scroll_y + 1,
+            wrapped.lines.len()
+        )
+    } else {
+        String::new()
+    };
+
     let input_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::Yellow))
         .title(Span::styled(
-            " 内容 (必填，支持多行自动换行) ",
+            format!(" 内容 (必填){scroll_info}"),
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ));
     let input_inner = input_block.inner(chunks[0]);
     frame.render_widget(input_block, chunks[0]);
-
-    let max_w = input_inner.width as usize;
-    let max_h = input_inner.height as usize;
-    let wrapped = wrap_input_text(value, max_w, cursor);
-
-    // 计算滚动行（确保光标所在行处于可见区域内）
-    let scroll_y = if max_h > 0 {
-        wrapped.cursor_line.saturating_sub(max_h - 1)
-    } else {
-        0
-    };
 
     let visible_lines: Vec<Line> = wrapped
         .lines
@@ -767,28 +885,45 @@ fn draw_input(frame: &mut Frame, mode: &InputState, value: &str, cursor: usize) 
     let p_input = Paragraph::new(visible_lines);
     frame.render_widget(p_input, input_inner);
 
-    // 硬件光标定位（支持中英文多行排版及中文输入法 IME 精确定位）
-    let cursor_rel_line = wrapped.cursor_line.saturating_sub(scroll_y) as u16;
-    let cursor_x =
-        (input_inner.x + wrapped.cursor_col as u16).min(input_inner.right().saturating_sub(1));
-    let cursor_y = (input_inner.y + cursor_rel_line).min(input_inner.bottom().saturating_sub(1));
-    frame.set_cursor_position((cursor_x, cursor_y));
+    // 硬件光标定位（若光标在当前滚动可视区域内，精准映射到终端坐标与 IME）
+    if wrapped.cursor_line >= scroll_y && wrapped.cursor_line < scroll_y + max_h {
+        let cursor_rel_line = (wrapped.cursor_line - scroll_y) as u16;
+        let cursor_x =
+            (input_inner.x + wrapped.cursor_col as u16).min(input_inner.right().saturating_sub(1));
+        let cursor_y =
+            (input_inner.y + cursor_rel_line).min(input_inner.bottom().saturating_sub(1));
+        frame.set_cursor_position((cursor_x, cursor_y));
+    }
 
     let tip = Line::from(vec![
         Span::styled(
-            "[Enter]",
+            "[Ctrl+S]",
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(" 保存待办    "),
+        Span::raw(" 保存    "),
+        Span::styled(
+            "[Enter]",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" 换行    "),
         Span::styled(
             "[↑/↓/←/→]",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(" 移动光标    "),
+        Span::raw(" 光标    "),
+        Span::styled(
+            "[滚轮/PgUp/PgDn]",
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" 翻页    "),
         Span::styled("[Esc]", Style::default().fg(Color::DarkGray)),
         Span::raw(" 取消"),
     ]);
@@ -985,14 +1120,40 @@ mod tests {
     }
 
     #[test]
+    fn test_wrap_input_with_newlines() {
+        let text = "第一行\n第二行内容\n\n第四行";
+        let wrapped = wrap_input_text(text, 20, 4); // cursor at '第' of 第二行
+        assert_eq!(wrapped.lines, vec!["第一行", "第二行内容", "", "第四行"]);
+        assert_eq!(wrapped.cursor_line, 1);
+        assert_eq!(wrapped.cursor_col, 0);
+    }
+
+    #[test]
+    fn test_ensure_cursor_visible_scrolling() {
+        let mut input = ActiveInput {
+            mode: InputState::Creating,
+            text: "1\n2\n3\n4\n5\n6\n7".to_string(),
+            cursor: 12, // at '7' (line 6)
+            scroll_top: 0,
+        };
+        // Box height is 3 lines
+        ensure_cursor_visible(&mut input, 20, 3);
+        // Should scroll down so line 6 is visible (scroll_top = 4: lines 4, 5, 6 visible)
+        assert_eq!(input.scroll_top, 4);
+
+        // Move cursor back to line 0 ('1')
+        input.cursor = 0;
+        ensure_cursor_visible(&mut input, 20, 3);
+        assert_eq!(input.scroll_top, 0);
+    }
+
+    #[test]
     fn test_char_at_line_col_navigation() {
         let text = "abcdefghij";
         let wrapped = wrap_input_text(text, 4, 6);
-        // Up navigation from line 1 col 2 ("efgh", col 2 -> 'g') to line 0
         let up_idx = char_at_line_col(text, &wrapped, 0, 2);
-        assert_eq!(up_idx, 2); // 'c'
-        // Down navigation from line 1 col 2 to line 2
+        assert_eq!(up_idx, 2);
         let down_idx = char_at_line_col(text, &wrapped, 2, 2);
-        assert_eq!(down_idx, 10); // 'j' followed by end
+        assert_eq!(down_idx, 10);
     }
 }

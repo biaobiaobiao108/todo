@@ -114,6 +114,32 @@ fn app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, store: &mut TodoSt
                             *cursor += 1;
                         }
                     }
+                    KeyCode::Up => {
+                        let size = terminal.size()?;
+                        let input_inner = input_box_inner(Rect::new(0, 0, size.width, size.height));
+                        let wrapped = wrap_input_text(text, input_inner.width as usize, *cursor);
+                        if wrapped.cursor_line > 0 {
+                            *cursor = char_at_line_col(
+                                text,
+                                &wrapped,
+                                wrapped.cursor_line - 1,
+                                wrapped.cursor_col,
+                            );
+                        }
+                    }
+                    KeyCode::Down => {
+                        let size = terminal.size()?;
+                        let input_inner = input_box_inner(Rect::new(0, 0, size.width, size.height));
+                        let wrapped = wrap_input_text(text, input_inner.width as usize, *cursor);
+                        if wrapped.cursor_line + 1 < wrapped.lines.len() {
+                            *cursor = char_at_line_col(
+                                text,
+                                &wrapped,
+                                wrapped.cursor_line + 1,
+                                wrapped.cursor_col,
+                            );
+                        }
+                    }
                     KeyCode::Home => {
                         *cursor = 0;
                     }
@@ -568,9 +594,111 @@ fn draw(
     list_inner
 }
 
+fn input_box_inner(area: Rect) -> Rect {
+    let modal_area = centered(area, 70, 45);
+    let inner = Rect {
+        x: modal_area.x + 2,
+        y: modal_area.y + 1,
+        width: modal_area.width.saturating_sub(4),
+        height: modal_area.height.saturating_sub(2),
+    };
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(3),    // 输入框，占满可用空间
+            Constraint::Length(1), // 底部操作提示
+        ])
+        .split(inner);
+    let input_block = Block::default().borders(Borders::ALL);
+    input_block.inner(chunks[0])
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct WrappedInput {
+    lines: Vec<String>,
+    cursor_line: usize,
+    cursor_col: usize,
+    line_char_ranges: Vec<std::ops::Range<usize>>,
+}
+
+fn wrap_input_text(text: &str, max_width: usize, cursor_char_idx: usize) -> WrappedInput {
+    let max_width = max_width.max(1);
+    let mut lines = Vec::new();
+    let mut line_char_ranges = Vec::new();
+    let mut current_line = String::new();
+    let mut current_width = 0;
+    let mut line_start_char = 0;
+
+    let mut cursor_pos = None;
+    let chars: Vec<char> = text.chars().collect();
+
+    for (i, &c) in chars.iter().enumerate() {
+        let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(1);
+
+        if current_width + cw > max_width && current_width > 0 {
+            line_char_ranges.push(line_start_char..i);
+            lines.push(current_line);
+            current_line = String::new();
+            current_width = 0;
+            line_start_char = i;
+        }
+
+        if i == cursor_char_idx {
+            cursor_pos = Some((lines.len(), current_width));
+        }
+
+        current_line.push(c);
+        current_width += cw;
+    }
+
+    if cursor_pos.is_none() && cursor_char_idx >= chars.len() {
+        if current_width >= max_width && current_width > 0 {
+            line_char_ranges.push(line_start_char..chars.len());
+            lines.push(current_line);
+            current_line = String::new();
+            current_width = 0;
+            line_start_char = chars.len();
+        }
+        cursor_pos = Some((lines.len(), current_width));
+    }
+
+    line_char_ranges.push(line_start_char..chars.len());
+    lines.push(current_line);
+
+    let (cursor_line, cursor_col) = cursor_pos.unwrap_or((0, 0));
+    WrappedInput {
+        lines,
+        cursor_line,
+        cursor_col,
+        line_char_ranges,
+    }
+}
+
+fn char_at_line_col(
+    text: &str,
+    wrapped: &WrappedInput,
+    target_line: usize,
+    target_col: usize,
+) -> usize {
+    if target_line >= wrapped.line_char_ranges.len() {
+        return text.chars().count();
+    }
+    let range = &wrapped.line_char_ranges[target_line];
+    let chars: Vec<char> = text.chars().collect();
+    let mut w = 0;
+    for (offset, &c) in chars[range.clone()].iter().enumerate() {
+        let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(1);
+        if w + cw > target_col {
+            return range.start + offset;
+        }
+        w += cw;
+    }
+    range.end
+}
+
 fn draw_input(frame: &mut Frame, mode: &InputState, value: &str, cursor: usize) {
-    let area = centered(frame.area(), 65, 30);
-    frame.render_widget(Clear, area);
+    let modal_area = centered(frame.area(), 70, 45);
+    frame.render_widget(Clear, modal_area);
 
     let modal_title = match mode {
         InputState::Creating => " ➕ 新增待办事项 ",
@@ -587,19 +715,19 @@ fn draw_input(frame: &mut Frame, mode: &InputState, value: &str, cursor: usize) 
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ));
-    frame.render_widget(block, area);
+    frame.render_widget(block, modal_area);
 
     let inner = Rect {
-        x: area.x + 2,
-        y: area.y + 1,
-        width: area.width.saturating_sub(4),
-        height: area.height.saturating_sub(2),
+        x: modal_area.x + 2,
+        y: modal_area.y + 1,
+        width: modal_area.width.saturating_sub(4),
+        height: modal_area.height.saturating_sub(2),
     };
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // 输入框
+            Constraint::Min(3),    // 输入框，自适应剩余高度
             Constraint::Length(1), // 底部操作提示
         ])
         .split(inner);
@@ -609,21 +737,41 @@ fn draw_input(frame: &mut Frame, mode: &InputState, value: &str, cursor: usize) 
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::Yellow))
         .title(Span::styled(
-            " 内容 (必填) ",
+            " 内容 (必填，支持多行自动换行) ",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ));
     let input_inner = input_block.inner(chunks[0]);
     frame.render_widget(input_block, chunks[0]);
-    let p_input = Paragraph::new(value);
+
+    let max_w = input_inner.width as usize;
+    let max_h = input_inner.height as usize;
+    let wrapped = wrap_input_text(value, max_w, cursor);
+
+    // 计算滚动行（确保光标所在行处于可见区域内）
+    let scroll_y = if max_h > 0 {
+        wrapped.cursor_line.saturating_sub(max_h - 1)
+    } else {
+        0
+    };
+
+    let visible_lines: Vec<Line> = wrapped
+        .lines
+        .iter()
+        .skip(scroll_y)
+        .take(max_h)
+        .map(|l| Line::from(l.as_str()))
+        .collect();
+
+    let p_input = Paragraph::new(visible_lines);
     frame.render_widget(p_input, input_inner);
 
-    // 硬件光标精确定位（IME / 中文输入法定位）
-    let before_cursor: String = value.chars().take(cursor).collect();
-    let text_w = UnicodeWidthStr::width(before_cursor.as_str()) as u16;
-    let cursor_x = (input_inner.x + text_w).min(input_inner.right().saturating_sub(1));
-    let cursor_y = input_inner.y;
+    // 硬件光标定位（支持中英文多行排版及中文输入法 IME 精确定位）
+    let cursor_rel_line = wrapped.cursor_line.saturating_sub(scroll_y) as u16;
+    let cursor_x =
+        (input_inner.x + wrapped.cursor_col as u16).min(input_inner.right().saturating_sub(1));
+    let cursor_y = (input_inner.y + cursor_rel_line).min(input_inner.bottom().saturating_sub(1));
     frame.set_cursor_position((cursor_x, cursor_y));
 
     let tip = Line::from(vec![
@@ -634,6 +782,13 @@ fn draw_input(frame: &mut Frame, mode: &InputState, value: &str, cursor: usize) 
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" 保存待办    "),
+        Span::styled(
+            "[↑/↓/←/→]",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" 移动光标    "),
         Span::styled("[Esc]", Style::default().fg(Color::DarkGray)),
         Span::raw(" 取消"),
     ]);
@@ -788,4 +943,56 @@ fn truncate_to_width(s: &str, max_width: usize) -> (String, usize) {
     }
     result.push_str("...");
     (result, current_width + 3)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_wrap_input_empty() {
+        let wrapped = wrap_input_text("", 10, 0);
+        assert_eq!(wrapped.lines, vec![""]);
+        assert_eq!(wrapped.cursor_line, 0);
+        assert_eq!(wrapped.cursor_col, 0);
+    }
+
+    #[test]
+    fn test_wrap_input_single_line() {
+        let wrapped = wrap_input_text("hello", 10, 3);
+        assert_eq!(wrapped.lines, vec!["hello"]);
+        assert_eq!(wrapped.cursor_line, 0);
+        assert_eq!(wrapped.cursor_col, 3);
+    }
+
+    #[test]
+    fn test_wrap_input_multi_line_ascii() {
+        let text = "abcdefghij";
+        let wrapped = wrap_input_text(text, 4, 6);
+        assert_eq!(wrapped.lines, vec!["abcd", "efgh", "ij"]);
+        assert_eq!(wrapped.cursor_line, 1);
+        assert_eq!(wrapped.cursor_col, 2); // 'g' is at col 2 on line 1
+    }
+
+    #[test]
+    fn test_wrap_input_cjk_boundary() {
+        let text = "待办事项测试多行显示功能";
+        // Each Chinese character width is 2. Width 6 holds 3 chars ("待办事", "项测试", "多行显", "示功能")
+        let wrapped = wrap_input_text(text, 6, 4); // char 4 is '测'
+        assert_eq!(wrapped.lines, vec!["待办事", "项测试", "多行显", "示功能"]);
+        assert_eq!(wrapped.cursor_line, 1);
+        assert_eq!(wrapped.cursor_col, 2); // '测' is at col 2 on line 1 ("项"=2, '测' starts at 2)
+    }
+
+    #[test]
+    fn test_char_at_line_col_navigation() {
+        let text = "abcdefghij";
+        let wrapped = wrap_input_text(text, 4, 6);
+        // Up navigation from line 1 col 2 ("efgh", col 2 -> 'g') to line 0
+        let up_idx = char_at_line_col(text, &wrapped, 0, 2);
+        assert_eq!(up_idx, 2); // 'c'
+        // Down navigation from line 1 col 2 to line 2
+        let down_idx = char_at_line_col(text, &wrapped, 2, 2);
+        assert_eq!(down_idx, 10); // 'j' followed by end
+    }
 }

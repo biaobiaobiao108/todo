@@ -250,24 +250,32 @@ fn data_path() -> Result<PathBuf> {
 mod tests {
     use super::*;
 
-    fn test_store() -> TodoStore {
-        let path = std::env::temp_dir().join(format!("todo-test-{}.db", std::process::id()));
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    fn test_store(name: &str) -> (TodoStore, PathBuf) {
+        let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "todo-test-{}-{}-{}.db",
+            std::process::id(),
+            name,
+            id
+        ));
         let _ = fs::remove_file(&path);
-        TodoStore::open(path).expect("测试数据库应当可以打开")
+        let store = TodoStore::open(&path).expect("测试数据库应当可以打开");
+        (store, path)
     }
 
     #[test]
     fn empty_title_is_rejected() {
-        let mut store = test_store();
+        let (mut store, path) = test_store("empty");
         assert!(store.add("  ".to_owned()).is_err());
+        drop(store);
+        let _ = fs::remove_file(path);
     }
 
     #[test]
     fn persists_add_toggle_and_remove() {
-        let path =
-            std::env::temp_dir().join(format!("todo-persist-test-{}.db", std::process::id()));
-        let _ = fs::remove_file(&path);
-        let mut store = TodoStore::open(&path).expect("测试数据库应当可以打开");
+        let (mut store, path) = test_store("persist");
         let item = store.add("测试 SQLite".to_owned()).expect("新增应成功");
         assert_eq!(item.id, 1);
         assert_eq!(store.items().len(), 1);
@@ -293,8 +301,7 @@ mod tests {
 
     #[test]
     fn reloads_external_changes() {
-        let path = std::env::temp_dir().join(format!("todo-reload-test-{}.db", std::process::id()));
-        let _ = fs::remove_file(&path);
+        let (_, path) = test_store("reload");
         let mut store1 = TodoStore::open(&path).expect("数据库应当可以打开");
         let mut store2 = TodoStore::open(&path).expect("数据库应当可以打开");
 
@@ -313,7 +320,7 @@ mod tests {
 
     #[test]
     fn id_based_crud_search_and_clear() {
-        let mut store = test_store();
+        let (mut store, path) = test_store("crud");
         let t1 = store.add("任务一".to_owned()).expect("添加1");
         let id1 = t1.id;
         let t2 = store.add("任务二(待办)".to_owned()).expect("添加2");
@@ -347,5 +354,7 @@ mod tests {
         // 按 ID 删除
         store.remove_by_id(id2).expect("按 ID 删除");
         assert!(store.items().is_empty());
+        drop(store);
+        let _ = fs::remove_file(path);
     }
 }

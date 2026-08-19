@@ -1,0 +1,68 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 1. Windows 64位 (直接输出 .exe)
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            src_bin: todo.exe
+            release_bin: todo-windows-x86_64.exe
+
+          # 2. macOS M芯片 / Apple Silicon
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            src_bin: todo
+            release_bin: todo-macos-arm64
+
+          # 3. Linux (Debian/Ubuntu 纯静态单二进制)
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            src_bin: todo
+            release_bin: todo-linux-x86_64
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install musl tools (Linux only)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build Single Binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Prepare Binary for Upload (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: cp target/${{ matrix.target }}/release/${{ matrix.src_bin }} ./${{ matrix.release_bin }}
+
+      - name: Prepare Binary for Upload (Unix)
+        if: matrix.os != 'windows-latest'
+        run: cp target/${{ matrix.target }}/release/${{ matrix.src_bin }} ./${{ matrix.release_bin }}
+
+      - name: Upload Single Binary to Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: ${{ matrix.release_bin }}
+          generate_release_notes: true
